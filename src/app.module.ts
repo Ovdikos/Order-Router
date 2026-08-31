@@ -1,7 +1,11 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule } from './config/config.module.js';
+import { RedisModule } from './redis/redis.module.js';
+import { OrdersModule } from './orders/orders.module.js';
 
 @Module({
-  imports: [ConfigModule],
+  imports: [
+    RedisModule,
+    OrdersModule,
+  ],
 })
 export class AppModule {}
