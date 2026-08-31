@@ -7,5 +7,5 @@ currencies:
     max: 100000
 
 webhooks:
-  ARS: 'https://webhook.site/ars-endpoint'
-  INR: 'https://webhook.site/inr-endpoint'
+  ARS: 'https://webhook.site/<your-token>'
+  INR: 'https://webhook.site/<your-token>'
