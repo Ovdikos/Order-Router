@@ -41,3 +41,10 @@ Decoupling ingestion from delivery is critical for handling traffic spikes (100 
 To ensure idempotency out of the box, I configured the producer to use the `order_id` as the BullMQ `jobId`. If a client retries a request due to a network glitch, BullMQ will recognize that a job with this ID already exists and will safely ignore the duplicate. 
 
 For the worker (`DeliveryProcessor`), I set `concurrency: 25`. This allows us to process up to 25 webhooks in parallel, preventing the queue from growing boundlessly during high traffic while protecting the application from being bottlenecked by a slow external provider.
+
+## Stage 4.5: Unit Testing
+**Branch:** `feature/unit-tests`
+
+To fulfill the strict requirement for testing routing, limits, and blocking logic, I implemented a comprehensive suite of Jest unit tests. 
+
+I focused on testing the core domain logic in isolation. By mocking the external dependencies (Redis and BullMQ), I was able to write deterministic tests for the `BlockingService` (verifying the exact math for the >= 100 orders and > 30% rejection rule) and the `RouteOrderHandler` (verifying that limits are respected and correct domain exceptions are thrown). This guarantees that our business rules work flawlessly regardless of the infrastructure state.
