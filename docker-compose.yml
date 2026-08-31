@@ -1,0 +1,30 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --appendfsync everysec
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  order-router:
+    build: .
+    ports:
+      - '3000:3000'
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CONFIG_PATH=/app/config/routing-rules.yaml
+    volumes:
+      - ./config:/app/config
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis-data:
