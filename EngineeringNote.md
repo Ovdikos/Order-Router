@@ -14,3 +14,12 @@ I decided to keep the infrastructure simple by using a single `docker-compose` s
 For the routing rules, the specification strictly requires that adding currencies or changing limits shouldn't require code changes. I chose a YAML configuration file parsed via `js-yaml`. 
 
 Initially, I considered using a file watcher like `chokidar` for hot-reloading. However, from past experience, file system events (like `inotify`) are notoriously flaky across Docker volume mounts, especially on Windows or macOS. Instead, I implemented a robust polling mechanism using `setInterval` and `fs.readFileSync` to check the config every 10 seconds. It has zero external dependencies and is bulletproof. I also added a strict validation step during `onModuleInit` to prevent the application from starting if the initial config is malformed.
+
+## Stage 2: Domain Errors and Validation
+**Branch:** `feature/domain-and-validation`
+
+The specification is very strict about separating structural validation errors (HTTP 400) from business routing errors (HTTP 422). To handle this cleanly, I built custom decorators like `@IsUuidV7` and `@IsClientId`. 
+
+For extracting the `created_at` timestamp from the UUIDv7, I skipped complex bitwise operations and just parsed the first 12 hex characters. It’s easier to read, maintain, and perfectly valid according to RFC 9562. I also added a critical sanity check to the extracted date: if the timestamp is before 2020 or strangely far in the future, it throws an error. Passing absurd dates (like 1970) to the provider would ruin their reconciliation reports.
+
+Architecture-wise, I decided to keep the HTTP context completely out of the business logic. Drawing from my experience with CQRS patterns (like MediatR in C#), the core handlers should only throw domain-specific exceptions (e.g., `ClientBlockedException`, `RoutingRejectedException`). I created a `DomainExceptionFilter` in NestJS to globally catch these domain errors and map them to the correct HTTP status codes (403, 422). This keeps the domain layer clean and highly testable.
