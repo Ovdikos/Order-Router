@@ -1,0 +1,11 @@
+currencies:
+  ARS:
+    min: 2000
+    max: 10000000
+  INR:
+    min: 200
+    max: 100000
+
+webhooks:
+  ARS: 'https://webhook.site/ars-endpoint'
+  INR: 'https://webhook.site/inr-endpoint'
