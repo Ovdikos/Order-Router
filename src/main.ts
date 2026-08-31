@@ -23,7 +23,7 @@ async function bootstrap(): Promise<void> {
 
   app.useGlobalFilters(new DomainExceptionFilter());
 
-  const port = 3000;
+  const port = 3001;
   await app.listen(port);
   Logger.log(`Application is running on port ${port}`, 'Bootstrap');
 }

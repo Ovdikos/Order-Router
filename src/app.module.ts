@@ -3,6 +3,8 @@ import { BullModule } from '@nestjs/bullmq';
 import { RedisModule } from './redis/redis.module.js';
 import { DeliveryModule } from './delivery/delivery.module.js';
 import { OrdersModule } from './orders/orders.module.js';
+import { ExpressAdapter } from '@bull-board/express';
+import { BullBoardModule } from '@bull-board/nestjs';
 
 @Module({
   imports: [
@@ -17,7 +19,11 @@ import { OrdersModule } from './orders/orders.module.js';
     RedisModule,
     DeliveryModule,
     OrdersModule,
+    BullBoardModule.forRoot({
+      route: '/queues',
+      adapter: ExpressAdapter,
+    }),
   ],
 })
-export class AppModule {}
+export class AppModule { }
 
