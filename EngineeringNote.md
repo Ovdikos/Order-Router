@@ -32,3 +32,12 @@ For the core routing logic, I chose `@nestjs/cqrs`. Coming from a C# background 
 For the anti-spam blocking mechanism (triggering at >= 100 orders and > 30% rejected), I needed a solution that works across multiple instances. Redis is the obvious choice. Initially, I thought about using a Lua script to prevent race conditions when reading and writing the counters. However, I realized that taking advantage of the return value of the Redis `INCR` command accomplishes the same goal with much less complexity. `INCR` is atomic and returns the incremented value, completely eliminating the read-modify-write race condition. 
 
 I also added a 30-day TTL (`EXPIRE`) to these counters. Without this, the Redis memory would grow infinitely, which violates the architectural constraint that we are a "pass-through node", not a permanent storage.
+
+## Stage 4: Queueing and Async Delivery (BullMQ)
+**Branch:** `feature/queue-delivery`
+
+Decoupling ingestion from delivery is critical for handling traffic spikes (100 - 200 RPS) without blocking the HTTP event loop. I chose BullMQ because it runs on top of Redis - which we are already using for counters and provides native retry mechanisms and concurrency control.
+
+To ensure idempotency out of the box, I configured the producer to use the `order_id` as the BullMQ `jobId`. If a client retries a request due to a network glitch, BullMQ will recognize that a job with this ID already exists and will safely ignore the duplicate. 
+
+For the worker (`DeliveryProcessor`), I set `concurrency: 25`. This allows us to process up to 25 webhooks in parallel, preventing the queue from growing boundlessly during high traffic while protecting the application from being bottlenecked by a slow external provider.
