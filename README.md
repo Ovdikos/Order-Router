@@ -7,7 +7,9 @@ A high-throughput, fault-tolerant order routing microservice built with **NestJS
 ## Table of Contents
 
 - [Overview](#overview)
+- [Getting Started](#getting-started)
 - [How to Run & Test](#how-to-run--test)
+- [Manual Testing Guide](#manual-testing-guide)
 - [API Reference](#api-reference)
 - [Architectural Decisions & Trade-offs](#architectural-decisions--trade-offs)
 
@@ -21,6 +23,49 @@ Order Router acts as a **pass-through ingestion node** between a client-facing A
 2. **Enforce anti-spam rules** — track per-client acceptance/rejection ratios in Redis and automatically block clients that exceed the threshold.
 3. **Route** accepted orders to the correct webhook URL based on currency, using a hot-reloadable YAML config.
 4. **Guarantee delivery** via a BullMQ queue with exponential-backoff retries and a Dead Letter Queue (DLQ) for failed jobs.
+
+---
+
+## Getting Started
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/Ovdikos/Order-Router.git
+cd Order-Router
+```
+
+### 2. Configure the webhook
+
+Open `config/routing-rules.yaml` and replace the placeholder URLs with your real endpoints.
+The easiest option is [webhook.site](https://webhook.site) — open the site, copy your unique URL, and paste it:
+
+```yaml
+currencies:
+  ARS:
+    min: 2000
+    max: 10000000
+  INR:
+    min: 200
+    max: 100000
+
+webhooks:
+  ARS: 'https://webhook.site/<your-token>'
+  INR: 'https://webhook.site/<your-token>'
+```
+
+### 3. Start the stack
+
+```bash
+docker-compose up --build
+```
+
+That's it. No `npm install` needed — the Docker image handles dependencies.
+Wait until you see:
+
+```
+[Bootstrap] Application is running on port 3001
+```
 
 ---
 
@@ -87,6 +132,220 @@ BullMQ dashboard is available at:
 ```
 http://localhost:3001/queues
 ```
+
+---
+
+## Manual Testing Guide
+
+All commands below assume the service is running on `localhost:3001`.
+For generating valid UUID v7 values use [uuidgenerator.net/version7](https://www.uuidgenerator.net/version7) — generate a fresh one before each request that must be unique.
+
+> **Tip:** In Postman, create a Collection Variable `{{base_url}}` = `http://localhost:3001` and a `{{uuid_v7}}` variable that you paste a fresh UUID into before each run.
+
+---
+
+### Case 1 — Happy path (202 Accepted)
+
+```bash
+curl -s -X POST http://localhost:3001/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "order_id": "<fresh-uuid-v7>",
+    "client_id": "cl_demo",
+    "currency": "ARS",
+    "amount": 50000
+  }'
+```
+
+**Expected response:**
+```json
+{ "status": "accepted", "order_id": "<your-uuid>" }
+```
+
+Check [webhook.site](https://webhook.site) — within a few seconds you should see the payload arrive:
+```json
+{
+  "order_id": "...",
+  "client_id": "cl_demo",
+  "currency": "ARS",
+  "amount": 50000,
+  "created_at": "2026-..."
+}
+```
+
+---
+
+### Case 2 — Idempotency (resend the same order_id)
+
+Send the **exact same request** a second time (same `order_id`).
+
+**Expected response:** `202` again — no duplicate in the queue, no change in counters.
+
+Verify in Redis that only one seen-key exists:
+```bash
+docker exec -it orderrouter-redis-1 redis-cli GET "order:seen:<your-uuid>"
+# → "1"
+```
+
+---
+
+### Case 3 — DTO validation error (400)
+
+Missing required field or wrong format:
+
+```bash
+curl -s -X POST http://localhost:3001/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "order_id": "not-a-uuid",
+    "client_id": "cl_demo",
+    "currency": "ARS",
+    "amount": 50000
+  }'
+```
+
+**Expected response:**
+```json
+{
+  "error": "VALIDATION_FAILED",
+  "details": [{ "field": "order_id", "reason": "must be a valid UUID v7" }]
+}
+```
+
+---
+
+### Case 4 — Unknown currency (422)
+
+```bash
+curl -s -X POST http://localhost:3001/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "order_id": "<fresh-uuid-v7>",
+    "client_id": "cl_demo",
+    "currency": "USD",
+    "amount": 100
+  }'
+```
+
+**Expected response:**
+```json
+{ "error": "ROUTING_REJECTED", "reason": "UNKNOWN_CURRENCY", "currency": "USD" }
+```
+
+---
+
+### Case 5 — Amount out of range (422)
+
+```bash
+curl -s -X POST http://localhost:3001/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "order_id": "<fresh-uuid-v7>",
+    "client_id": "cl_demo",
+    "currency": "ARS",
+    "amount": 1
+  }'
+```
+
+**Expected response:**
+```json
+{
+  "error": "ROUTING_REJECTED",
+  "reason": "AMOUNT_OUT_OF_RANGE",
+  "currency": "ARS",
+  "allowed_range": { "min": 2000, "max": 10000000 }
+}
+```
+
+---
+
+### Case 6 — Trigger client blocking (403)
+
+The blocking rule: **≥100 total orders, >30% rejected**.
+
+The quickest way to trigger it is to send many rejections for one client. Run this loop in your terminal (sends 100 requests with an invalid currency, each increments `total` and `rejected`):
+
+```bash
+for i in $(seq 1 100); do
+  curl -s -X POST http://localhost:3001/orders \
+    -H "Content-Type: application/json" \
+    -d "{\"order_id\":\"$(uuidgen)\",\"client_id\":\"cl_spammer\",\"currency\":\"BAD\",\"amount\":100}" \
+    > /dev/null
+done
+```
+
+> **Windows PowerShell alternative:**
+> ```powershell
+> 1..100 | ForEach-Object {
+>   $uuid = [System.Guid]::NewGuid().ToString()
+>   Invoke-RestMethod -Method Post -Uri http://localhost:3001/orders `
+>     -ContentType "application/json" `
+>     -Body "{`"order_id`":`"$uuid`",`"client_id`":`"cl_spammer`",`"currency`":`"BAD`",`"amount`":100}"
+> }
+> ```
+
+After the loop, send one more request from the same client with valid data:
+
+```bash
+curl -s -X POST http://localhost:3001/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "order_id": "<fresh-uuid-v7>",
+    "client_id": "cl_spammer",
+    "currency": "ARS",
+    "amount": 50000
+  }'
+```
+
+**Expected response:**
+```json
+{ "error": "CLIENT_BLOCKED", "client_id": "cl_spammer" }
+```
+
+---
+
+### Inspecting Redis state
+
+Open an interactive Redis CLI session:
+
+```bash
+docker exec -it orderrouter-redis-1 redis-cli
+```
+
+| Goal | Command |
+|---|---|
+| List all blocked clients | `SMEMBERS blocked_clients` |
+| Check total orders for a client | `GET client:total:cl_spammer` |
+| Check rejected orders for a client | `GET client:rejected:cl_spammer` |
+| Check idempotency key for an order | `GET order:seen:<uuid>` |
+| See remaining TTL on a counter | `TTL client:total:cl_spammer` |
+| Manually unblock a client | `SREM blocked_clients cl_spammer` |
+| Reset counters for a client | `DEL client:total:cl_spammer client:rejected:cl_spammer` |
+| List all keys (debug only) | `KEYS *` |
+
+**Example session after running Case 6:**
+```
+127.0.0.1:6379> SMEMBERS blocked_clients
+1) "cl_spammer"
+
+127.0.0.1:6379> GET client:total:cl_spammer
+"101"
+
+127.0.0.1:6379> GET client:rejected:cl_spammer
+"100"
+```
+
+---
+
+### Hot-reload config (no restart needed)
+
+1. Edit `config/routing-rules.yaml` — for example, add a new currency or change a limit.
+2. Wait up to **10 seconds**.
+3. Watch the Docker logs — you'll see:
+   ```
+   [RoutingConfigService] Config reloaded: ARS, INR, EUR
+   ```
+4. Send a request with the new currency — it should be accepted immediately.
 
 ---
 
