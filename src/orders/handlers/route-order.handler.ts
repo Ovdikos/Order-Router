@@ -4,9 +4,12 @@ import { RouteOrderCommand } from '../commands/route-order.command.js';
 import { RoutingConfigService } from '../../config/routing-config.service.js';
 import { BlockingService } from '../../blocking/blocking.service.js';
 import { DeliveryProducer } from '../../delivery/delivery.producer.js';
-import { extractCreatedAtFromUuidV7 } from '../../shared/uuid-v7.utils.js';
+import { RedisService } from '../../redis/redis.service.js';
+import { extractCreatedAtFromUuidV7 } from '../utils/uuid-v7.utils.js';
 import { ClientBlockedException } from '../exceptions/client-blocked.exception.js';
 import { RoutingRejectedException } from '../exceptions/routing-rejected.exception.js';
+
+const ORDER_SEEN_TTL_S = 86_400;
 
 @CommandHandler(RouteOrderCommand)
 export class RouteOrderHandler implements ICommandHandler<RouteOrderCommand> {
@@ -16,10 +19,16 @@ export class RouteOrderHandler implements ICommandHandler<RouteOrderCommand> {
     private readonly config: RoutingConfigService,
     private readonly blocking: BlockingService,
     private readonly delivery: DeliveryProducer,
-  ) { }
+    private readonly redis: RedisService,
+  ) {}
 
   async execute(command: RouteOrderCommand): Promise<{ status: string; order_id: string }> {
     const { orderId, clientId, currency, amount } = command;
+
+    const isNew = await this.redis.setNx(`order:seen:${orderId}`, '1', ORDER_SEEN_TTL_S);
+    if (!isNew) {
+      return { status: 'accepted', order_id: orderId };
+    }
 
     if (await this.blocking.isBlocked(clientId)) {
       throw new ClientBlockedException(clientId);
@@ -43,8 +52,6 @@ export class RouteOrderHandler implements ICommandHandler<RouteOrderCommand> {
 
     const createdAt = extractCreatedAtFromUuidV7(orderId);
 
-    await this.blocking.recordAccepted(clientId);
-
     try {
       await this.delivery.enqueue({
         order_id: orderId,
@@ -62,6 +69,8 @@ export class RouteOrderHandler implements ICommandHandler<RouteOrderCommand> {
         order_id: orderId,
       });
     }
+
+    await this.blocking.recordAccepted(clientId);
 
     return { status: 'accepted', order_id: orderId };
   }

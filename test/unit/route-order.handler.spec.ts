@@ -4,6 +4,7 @@ import { RouteOrderHandler } from '../../src/orders/handlers/route-order.handler
 import { BlockingService } from '../../src/blocking/blocking.service.js';
 import { RoutingConfigService } from '../../src/config/routing-config.service.js';
 import { DeliveryProducer } from '../../src/delivery/delivery.producer.js';
+import { RedisService } from '../../src/redis/redis.service.js';
 import { RouteOrderCommand } from '../../src/orders/commands/route-order.command.js';
 import { ClientBlockedException } from '../../src/orders/exceptions/client-blocked.exception.js';
 import { RoutingRejectedException } from '../../src/orders/exceptions/routing-rejected.exception.js';
@@ -14,7 +15,7 @@ const CURRENCY = 'ARS';
 const VALID_AMOUNT = 50_000;
 const ARS_RULE = { min: 2000, max: 10_000_000 };
 
-vi.mock('../../src/shared/uuid-v7.utils.js', () => ({
+vi.mock('../../src/orders/utils/uuid-v7.utils.js', () => ({
   extractCreatedAtFromUuidV7: vi.fn().mockReturnValue('2024-01-15T10:00:00.000Z'),
 }));
 
@@ -40,14 +41,22 @@ function makeDeliveryMock() {
   };
 }
 
+function makeRedisMock() {
+  return {
+    setNx: vi.fn().mockResolvedValue(true),
+  };
+}
+
 async function buildHandler(overrides?: {
   blocking?: Partial<ReturnType<typeof makeBlockingMock>>;
   config?: Partial<ReturnType<typeof makeConfigMock>>;
   delivery?: Partial<ReturnType<typeof makeDeliveryMock>>;
+  redis?: Partial<ReturnType<typeof makeRedisMock>>;
 }) {
   const blockingMock = { ...makeBlockingMock(), ...overrides?.blocking };
   const configMock = { ...makeConfigMock(), ...overrides?.config };
   const deliveryMock = { ...makeDeliveryMock(), ...overrides?.delivery };
+  const redisMock = { ...makeRedisMock(), ...overrides?.redis };
 
   const module = await Test.createTestingModule({
     providers: [
@@ -55,6 +64,7 @@ async function buildHandler(overrides?: {
       { provide: BlockingService, useValue: blockingMock },
       { provide: RoutingConfigService, useValue: configMock },
       { provide: DeliveryProducer, useValue: deliveryMock },
+      { provide: RedisService, useValue: redisMock },
     ],
   }).compile();
 
@@ -63,6 +73,7 @@ async function buildHandler(overrides?: {
     blocking: blockingMock,
     config: configMock,
     delivery: deliveryMock,
+    redis: redisMock,
   };
 }
 
@@ -77,6 +88,17 @@ function makeCommand(overrides?: Partial<RouteOrderCommand>): RouteOrderCommand 
 
 describe('RouteOrderHandler', () => {
   describe('execute', () => {
+    it('returns accepted immediately for duplicate order_id (idempotency)', async () => {
+      const { handler, blocking } = await buildHandler({
+        redis: { setNx: vi.fn().mockResolvedValue(false) },
+      });
+
+      const result = await handler.execute(makeCommand());
+
+      expect(result).toEqual({ status: 'accepted', order_id: VALID_UUID_V7 });
+      expect(blocking.isBlocked).not.toHaveBeenCalled();
+    });
+
     it('throws ClientBlockedException when client is blocked', async () => {
       const { handler } = await buildHandler({
         blocking: { isBlocked: vi.fn().mockResolvedValue(true) },
@@ -112,7 +134,7 @@ describe('RouteOrderHandler', () => {
       const { handler, blocking } = await buildHandler();
 
       await expect(
-        handler.execute(makeCommand({ amount: 100 })), // ARS min is 2000
+        handler.execute(makeCommand({ amount: 100 })),
       ).rejects.toThrow(RoutingRejectedException);
 
       expect(blocking.recordRejection).toHaveBeenCalledWith(CLIENT_ID);
@@ -122,7 +144,7 @@ describe('RouteOrderHandler', () => {
       const { handler, blocking } = await buildHandler();
 
       await expect(
-        handler.execute(makeCommand({ amount: 999_999_999 })), // ARS max is 10_000_000
+        handler.execute(makeCommand({ amount: 999_999_999 })),
       ).rejects.toThrow(RoutingRejectedException);
 
       expect(blocking.recordRejection).toHaveBeenCalledWith(CLIENT_ID);
@@ -138,12 +160,11 @@ describe('RouteOrderHandler', () => {
       expect((err as RoutingRejectedException).details.allowed_range).toEqual(ARS_RULE);
     });
 
-    it('happy path: calls recordAccepted, enqueues payload, and returns accepted', async () => {
+    it('happy path: enqueues payload, then calls recordAccepted, returns accepted', async () => {
       const { handler, blocking, delivery } = await buildHandler();
 
       const result = await handler.execute(makeCommand());
 
-      expect(blocking.recordAccepted).toHaveBeenCalledWith(CLIENT_ID);
       expect(delivery.enqueue).toHaveBeenCalledWith(
         expect.objectContaining({
           order_id: VALID_UUID_V7,
@@ -153,17 +174,20 @@ describe('RouteOrderHandler', () => {
           created_at: '2024-01-15T10:00:00.000Z',
         }),
       );
+      expect(blocking.recordAccepted).toHaveBeenCalledWith(CLIENT_ID);
       expect(result).toEqual({ status: 'accepted', order_id: VALID_UUID_V7 });
     });
 
-    it('throws ServiceUnavailableException when enqueue fails', async () => {
-      const { handler } = await buildHandler({
+    it('does NOT call recordAccepted when enqueue fails', async () => {
+      const { handler, blocking } = await buildHandler({
         delivery: { enqueue: vi.fn().mockRejectedValue(new Error('Redis down')) },
       });
 
       await expect(handler.execute(makeCommand())).rejects.toThrow(
         ServiceUnavailableException,
       );
+
+      expect(blocking.recordAccepted).not.toHaveBeenCalled();
     });
   });
 });

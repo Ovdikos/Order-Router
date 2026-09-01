@@ -1,4 +1,4 @@
-import { InvalidOrderDateException } from '../orders/exceptions/invalid-order-date.exception.js';
+import { InvalidOrderDateException } from '../exceptions/invalid-order-date.exception.js';
 
 const MIN_TIMESTAMP_MS = new Date('2020-01-01T00:00:00.000Z').getTime();
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;

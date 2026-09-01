@@ -25,6 +25,10 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     await this.client.quit();
   }
 
+  getClient(): Redis {
+    return this.client;
+  }
+
   incr(key: string): Promise<number> {
     return this.client.incr(key);
   }
@@ -44,5 +48,9 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   get(key: string): Promise<string | null> {
     return this.client.get(key);
   }
-}
 
+  async setNx(key: string, value: string, ttlSeconds: number): Promise<boolean> {
+    const result = await this.client.set(key, value, 'EX', ttlSeconds, 'NX');
+    return result === 'OK';
+  }
+}
