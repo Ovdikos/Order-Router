@@ -1,29 +1,27 @@
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
+import { BullBoardModule } from '@bull-board/nestjs';
+import { ExpressAdapter } from '@bull-board/express';
 import { RedisModule } from './redis/redis.module.js';
+import { RedisService } from './redis/redis.service.js';
 import { DeliveryModule } from './delivery/delivery.module.js';
 import { OrdersModule } from './orders/orders.module.js';
-import { ExpressAdapter } from '@bull-board/express';
-import { BullBoardModule } from '@bull-board/nestjs';
 
 @Module({
   imports: [
+    RedisModule,
     BullModule.forRootAsync({
-      useFactory: () => ({
-        connection: {
-          host: process.env['REDIS_HOST'] ?? 'localhost',
-          port: parseInt(process.env['REDIS_PORT'] ?? '6379', 10),
-        },
+      inject: [RedisService],
+      useFactory: (redis: RedisService) => ({
+        connection: redis.getClient(),
       }),
     }),
-    RedisModule,
-    DeliveryModule,
-    OrdersModule,
     BullBoardModule.forRoot({
       route: '/queues',
       adapter: ExpressAdapter,
     }),
+    DeliveryModule,
+    OrdersModule,
   ],
 })
-export class AppModule { }
-
+export class AppModule {}

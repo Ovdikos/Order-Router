@@ -38,14 +38,14 @@ docker-compose up --build
 
 This starts two containers:
 - `redis` — Redis 7 with AOF persistence enabled (`appendfsync everysec`)
-- `order-router` — NestJS application on port `3000`
+- `order-router` — NestJS application on port `3001`
 
 The service performs a **fail-fast config load** on startup: if `config/routing-rules.yaml` is missing or malformed, the process exits immediately with a descriptive error.
 
 ### Send a test order
 
 ```bash
-curl -X POST http://localhost:3000/orders \
+curl -X POST http://localhost:3001/orders \
   -H "Content-Type: application/json" \
   -d '{
     "order_id": "018d3b5c-1234-7abc-8def-000000000001",
@@ -77,7 +77,15 @@ npm test
 ```
 ✓ test/unit/blocking.service.spec.ts        (5 tests)
 ✓ test/unit/routing-config.service.spec.ts  (6 tests)
-✓ test/unit/route-order.handler.spec.ts     (8 tests)
+✓ test/unit/route-order.handler.spec.ts     (9 tests)
+```
+
+### Monitor the queue
+
+BullMQ dashboard is available at:
+
+```
+http://localhost:3001/queues
 ```
 
 ---
@@ -90,12 +98,12 @@ Accepts a new order for routing.
 
 #### Request body
 
-| Field      | Type     | Description                                              |
-|------------|----------|----------------------------------------------------------|
-| `order_id` | `string` | UUID v7. The embedded timestamp is validated (≥ 2020, ≤ now + 24h). |
-| `client_id`| `string` | Must match `cl_<alphanum>` (e.g. `cl_acme123`).          |
-| `currency` | `string` | Currency code. Existence in config is checked in the handler, not the DTO. |
-| `amount`   | `number` | Positive number, max 2 decimal places.                   |
+| Field      | Type     | Description                                                                  |
+|------------|----------|------------------------------------------------------------------------------|
+| `order_id` | `string` | UUID v7. The embedded timestamp is validated (≥ 2020, ≤ now + 24h).         |
+| `client_id`| `string` | Must match `cl_<alphanum>` (e.g. `cl_acme123`).                              |
+| `currency` | `string` | Currency code. Existence in config is checked in the handler, not the DTO.   |
+| `amount`   | `number` | Positive number, max 2 decimal places.                                       |
 
 #### Response codes
 
@@ -131,11 +139,35 @@ Accepts a new order for routing.
 
 ## Architectural Decisions & Trade-offs
 
+### CQRS for a Single Endpoint
+
+The service uses `@nestjs/cqrs` with a `CommandBus` even though there is currently only one command (`RouteOrderCommand`). This is a deliberate choice, not over-engineering:
+
+- **Separation of concerns.** The HTTP layer (`OrdersController`) is responsible exclusively for parsing the request, validating the DTO format, and returning an HTTP response. All business logic - currency validation, blocking, routing, enqueuing - lives in `RouteOrderHandler`. Neither layer knows the internals of the other.
+- **Testability.** `RouteOrderHandler` can be tested as a plain class with mocked dependencies, with no HTTP context involved. The nine unit tests in `route-order.handler.spec.ts` demonstrate this: they test every business branch without spinning up an HTTP server.
+- **Scalability signal.** Adopting CQRS from the start means adding a second command (`CancelOrderCommand`), an event (`OrderRoutedEvent`), or a saga requires zero refactoring of existing code. The architecture is ready to grow without rewrites.
+
+---
+
 ### Distributed State & Consistency
 
 The service is designed to run behind a load balancer with **multiple instances**. This means any local in-memory state (e.g. a plain `Map` for counters) would be invisible to other instances, leading to incorrect blocking decisions.
 
 All mutable state — rejection/acceptance counters, the blocked-clients set, and the BullMQ job queue — lives exclusively in **Redis**. Redis's `INCR` command is **atomic at the server level**, which eliminates race conditions when multiple instances process requests for the same client simultaneously. No distributed locks or coordination protocols are needed.
+
+A single ioredis connection is shared between the blocking service and BullMQ via `RedisService.getClient()`, avoiding duplicate TCP connection pools.
+
+---
+
+### HTTP Idempotency
+
+Before any business logic runs, `execute` performs:
+
+```
+SET order:seen:{order_id} 1 EX 86400 NX
+```
+
+If the key already exists (`NX` fails), the handler returns `{ status: 'accepted' }` immediately without touching counters or the queue. This makes the endpoint safe to retry on network errors: a client that receives no response can re-send the same `order_id` and is guaranteed not to double-count or double-enqueue.
 
 ---
 
@@ -218,7 +250,7 @@ After 15 failed attempts, the job moves to the **`failed`** state in BullMQ. It 
 
 **Recovery options for operators:**
 
-- **BullMQ Dashboard** (e.g. [Bull Board](https://github.com/felixmosh/bull-board)) — visual retry/discard interface.
+- **BullMQ Dashboard** — available at `http://localhost:3001/queues` for visual retry/discard.
 - **Bulk retry via script:**
   ```ts
   const failedJobs = await queue.getFailed();
@@ -229,4 +261,4 @@ After 15 failed attempts, the job moves to the **`failed`** state in BullMQ. It 
   await queue.clean(0, 1000, 'failed');
   ```
 
-The `jobId: payload.order_id` field ensures **idempotency** — retrying a job that was already successfully delivered to the webhook will be deduplicated at the BullMQ level (a job with the same ID cannot be added twice while one already exists).
+The `jobId: payload.order_id` field ensures **idempotency** at the queue level - BullMQ will not add a duplicate job while one with the same ID is already active or waiting. Combined with the HTTP-layer `SET NX` guard, this creates two independent idempotency barriers.

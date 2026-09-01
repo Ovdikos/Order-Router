@@ -2,7 +2,22 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
-import type { CurrencyRule, RoutingRules } from './routing-rules.types.js';
+import { z } from 'zod';
+
+const CurrencyRuleSchema = z.object({
+  min: z.number(),
+  max: z.number(),
+}).refine((r) => r.min <= r.max, { message: 'min must be <= max' });
+
+const RoutingRulesSchema = z.object({
+  currencies: z.record(z.string(), CurrencyRuleSchema).refine(
+    (c) => Object.keys(c).length > 0,
+    { message: 'currencies must not be empty' },
+  ),
+  webhooks: z.record(z.string(), z.string()).optional(),
+});
+
+type RoutingRules = z.infer<typeof RoutingRulesSchema>;
 
 @Injectable()
 export class RoutingConfigService implements OnModuleInit, OnModuleDestroy {
@@ -16,14 +31,8 @@ export class RoutingConfigService implements OnModuleInit, OnModuleDestroy {
   );
 
   onModuleInit(): void {
-    // First load is strict: missing or invalid config prevents startup.
-    this.loadConfig(true);
-
-    // Reload every 10 seconds. Broken config during hot-reload is logged
-    // but the service keeps running with the previous valid rules.
-    // We avoid chokidar here because it has known issues with Docker on
-    // Windows / macOS (inotify / FSEvents differences).
-    this.intervalRef = setInterval(() => this.loadConfig(false), 10_000);
+    this.loadConfigOrThrow();
+    this.intervalRef = setInterval(() => this.tryReloadConfig(), 10_000);
   }
 
   onModuleDestroy(): void {
@@ -32,77 +41,33 @@ export class RoutingConfigService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /**
-   * Reads and parses the YAML config file.
-   *
-   * @param failOnError - When true (startup), an invalid config throws and
-   *   prevents the application from starting. When false (hot-reload), errors
-   *   are only logged and the previous valid rules are kept in memory.
-   */
-  private loadConfig(failOnError: boolean): void {
+  private parse(): RoutingRules {
+    const raw = fs.readFileSync(this.configPath, 'utf-8');
+    const parsed = yaml.load(raw);
+    return RoutingRulesSchema.parse(parsed);
+  }
+
+  private loadConfigOrThrow(): void {
     try {
-      const raw = fs.readFileSync(this.configPath, 'utf-8');
-      const parsed = yaml.load(raw) as unknown;
-
-      if (!this.isValidConfig(parsed)) {
-        throw new Error(
-          'Invalid config structure: "currencies" must be a non-empty object where every entry has numeric min <= max',
-        );
-      }
-
-      this.rules = parsed;
-      this.logger.log(
-        `Config loaded: ${Object.keys(parsed.currencies).join(', ')}`,
-      );
+      this.rules = this.parse();
+      this.logger.log(`Config loaded: ${Object.keys(this.rules.currencies).join(', ')}`);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`Fatal: cannot start without valid config — ${message}`);
+    }
+  }
 
-      if (failOnError) {
-        // Rethrow so NestJS lifecycle hooks abort the bootstrap.
-        throw new Error(`Fatal: cannot start without valid config — ${message}`);
-      }
-
-      // Hot-reload failure: keep previous rules, do not crash.
+  private tryReloadConfig(): void {
+    try {
+      this.rules = this.parse();
+      this.logger.log(`Config reloaded: ${Object.keys(this.rules.currencies).join(', ')}`);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
       this.logger.error(`Config reload failed, keeping previous rules: ${message}`);
     }
   }
 
-  /**
-   * Type-guard that validates the shape of a parsed YAML object.
-   * Checks:
-   *  - top-level `currencies` key is a non-empty plain object
-   *  - every currency entry has numeric `min` and `max` with min <= max
-   */
-  private isValidConfig(config: unknown): config is RoutingRules {
-    if (config === null || typeof config !== 'object') return false;
-
-    const candidate = config as Record<string, unknown>;
-
-    if (
-      candidate['currencies'] === null ||
-      typeof candidate['currencies'] !== 'object' ||
-      Array.isArray(candidate['currencies'])
-    ) {
-      return false;
-    }
-
-    const currencies = candidate['currencies'] as Record<string, unknown>;
-
-    if (Object.keys(currencies).length === 0) return false;
-
-    for (const rule of Object.values(currencies)) {
-      if (rule === null || typeof rule !== 'object') return false;
-
-      const r = rule as Record<string, unknown>;
-
-      if (typeof r['min'] !== 'number' || typeof r['max'] !== 'number') return false;
-      if (r['min'] > r['max']) return false;
-    }
-
-    return true;
-  }
-
-  getRule(currency: string): CurrencyRule | undefined {
+  getRule(currency: string): { min: number; max: number } | undefined {
     return this.rules.currencies[currency];
   }
 
