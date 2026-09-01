@@ -15,7 +15,7 @@ services:
   order-router:
     build: .
     ports:
-      - '3000:3000'
+      - '3001:3001'
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
