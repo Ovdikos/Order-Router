@@ -11,11 +11,20 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       host: process.env['REDIS_HOST'] ?? 'localhost',
       port: parseInt(process.env['REDIS_PORT'] ?? '6379', 10),
       lazyConnect: true,
+      maxRetriesPerRequest: null,
     });
   }
 
   async onModuleInit(): Promise<void> {
-    await this.client.connect();
+    if (this.client.status === 'wait') {
+      try {
+        await this.client.connect();
+      } catch (err: any) {
+        if (err.message !== 'Redis is already connecting/connected') {
+          throw err;
+        }
+      }
+    }
     this.logger.log(
       `Connected to Redis at ${this.client.options.host}:${this.client.options.port}`,
     );
